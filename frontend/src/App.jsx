@@ -44,7 +44,7 @@ function AppInner() {
   if (user) return <Dashboard />;
 
   /* Login page */
-  if (page === 'login') return <LoginPage />;
+  if (page === 'login') return <LoginPage onBack={() => setPage('landing')} />;
 
   /* Landing page */
   return (

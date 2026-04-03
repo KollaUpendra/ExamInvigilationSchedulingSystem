@@ -1,20 +1,20 @@
 /**
  * @file src/hooks/useIntersectionObserver.js
  * @description Custom React hook that adds the `.visible` class to
- * elements with the `.reveal` class as soon as they enter the viewport.
+ * elements matching `selector` as soon as they enter the viewport.
  *
  * How to use:
  *  1. Apply className="reveal" (and optionally "reveal-delay-N") to any element.
- *  2. Call useIntersectionObserver() once in a parent component (e.g. App.jsx).
+ *  2. Call useIntersectionObserver('.reveal', { threshold: 0.12 }) in a parent.
  *  3. When the element scrolls into view, the hook adds ".visible" triggering the CSS animation.
  *
- * Options passed to IntersectionObserver:
- *  threshold : 0.12 — element is 12% visible before triggering
+ * @param {string} selector  - CSS selector for elements to observe (default: '.reveal')
+ * @param {IntersectionObserverInit} options  - IntersectionObserver options (default: { threshold: 0.12 })
  */
 
 import { useEffect } from 'react';
 
-const useIntersectionObserver = () => {
+const useIntersectionObserver = (selector = '.reveal', options = { threshold: 0.12 }) => {
     useEffect(() => {
         const observer = new IntersectionObserver(
             (entries) => {
@@ -26,14 +26,16 @@ const useIntersectionObserver = () => {
                     }
                 });
             },
-            { threshold: 0.12 }
+            options
         );
 
         // Select all elements that want scroll-reveal
-        const targets = document.querySelectorAll('.reveal');
+        const targets = document.querySelectorAll(selector);
         targets.forEach((el) => observer.observe(el));
 
         return () => observer.disconnect();
+    // The selector and options are treated as stable config — intentionally not in deps.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 };
 

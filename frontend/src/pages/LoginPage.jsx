@@ -8,7 +8,7 @@ import { useGoogleLogin } from '@react-oauth/google';
 import { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 
-export default function LoginPage() {
+export default function LoginPage({ onBack }) {
     const { login } = useAuth();
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
@@ -211,7 +211,7 @@ export default function LoginPage() {
 
                 {/* Back to landing link */}
                 <button
-                    onClick={() => window.history.back()}
+                    onClick={() => onBack ? onBack() : window.history.back()}
                     style={{
                         background: 'none', border: 'none',
                         color: 'rgba(255,255,255,0.35)',

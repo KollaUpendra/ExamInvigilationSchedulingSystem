@@ -1,71 +1,102 @@
 /**
  * @file routes/leads.js
- * @description Express router for the /api/leads endpoint.
+ * @description Express router for /api/leads — landing-page lead capture.
  *
  * Routes:
- *  POST /api/leads  — Accepts a lead submission from the landing page
- *                     "Get Started" form and saves it to MongoDB.
+ *  POST /api/leads  — Validates and saves a lead to MongoDB.
+ *  GET  /api/leads  — Returns all leads (admin use only; protect in production).
  *
- * Request Body (JSON):
- *  { name: String, email: String, institution: String }
- *
- * Responses:
- *  201 { success: true, message: "...", data: Lead }  — Created
- *  400 { success: false, message: "..." }             — Validation error
- *  409 { success: false, message: "..." }             — Duplicate email
- *  500 { success: false, message: "..." }             — Server error
+ * Error shape:  { success: false, code: 'ERROR_CODE', message: '...' }
+ * Success shape: { success: true, message: '...', data: Lead } (POST)
+ *               { success: true, count: N, data: Lead[] }     (GET)
  */
 
 const express = require('express');
 const router = express.Router();
 const Lead = require('../models/Lead');
 
+const IS_PROD = process.env.NODE_ENV === 'production';
+
 /**
  * @route   POST /api/leads
- * @desc    Save a new lead captured from the landing page sign-up form
+ * @desc    Save a new lead from the landing-page "Get Started" form.
  * @access  Public
  */
 router.post('/', async (req, res) => {
     try {
         const { name, email, institution } = req.body;
 
-        // Basic presence check (Mongoose will also validate types & formats)
+        // ── Field presence ─────────────────────────────────────────────────────
         if (!name || !email || !institution) {
             return res.status(400).json({
                 success: false,
+                code: 'MISSING_FIELDS',
                 message: 'Please provide name, email, and institution.',
             });
         }
 
-        // Create and save the lead document
-        const lead = await Lead.create({ name, email, institution });
+        // ── Basic format guards (belt-and-suspenders over Mongoose validation) ─
+        const emailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRe.test(String(email).trim())) {
+            return res.status(400).json({
+                success: false,
+                code: 'INVALID_EMAIL',
+                message: 'Please provide a valid email address.',
+            });
+        }
+        if (String(name).trim().length < 2) {
+            return res.status(400).json({
+                success: false,
+                code: 'INVALID_NAME',
+                message: 'Name must be at least 2 characters.',
+            });
+        }
+        if (String(institution).trim().length < 2) {
+            return res.status(400).json({
+                success: false,
+                code: 'INVALID_INSTITUTION',
+                message: 'Institution name must be at least 2 characters.',
+            });
+        }
+
+        const lead = await Lead.create({
+            name: String(name).trim(),
+            email: String(email).trim().toLowerCase(),
+            institution: String(institution).trim(),
+        });
 
         return res.status(201).json({
             success: true,
             message: "You're on the list! We'll be in touch soon.",
             data: lead,
         });
+
     } catch (error) {
-        // Handle duplicate email (MongoDB error code 11000)
+        // Duplicate email (MongoDB duplicate-key error)
         if (error.code === 11000) {
             return res.status(409).json({
                 success: false,
+                code: 'DUPLICATE_EMAIL',
                 message: 'This email is already registered. We will reach out soon!',
             });
         }
 
-        // Handle Mongoose validation errors
+        // Mongoose validation failure
         if (error.name === 'ValidationError') {
-            const messages = Object.values(error.errors).map((e) => e.message);
+            const message = Object.values(error.errors).map((e) => e.message).join(', ');
             return res.status(400).json({
                 success: false,
-                message: messages.join(', '),
+                code: 'VALIDATION_ERROR',
+                message,
             });
         }
 
-        console.error('Lead creation error:', error);
+        if (!IS_PROD) console.error('[leads] POST error:', error.stack);
+        else console.error('[leads] POST error:', error.message);
+
         return res.status(500).json({
             success: false,
+            code: 'INTERNAL_ERROR',
             message: 'Server error. Please try again later.',
         });
     }
@@ -73,16 +104,17 @@ router.post('/', async (req, res) => {
 
 /**
  * @route   GET /api/leads
- * @desc    Retrieve all leads (admin use — protect in production)
- * @access  Public (demo) — Add auth middleware in production
+ * @desc    Retrieve all leads — admin use only.
+ * @access  Public (demo) — Add auth middleware before releasing to production.
  */
 router.get('/', async (req, res) => {
     try {
-        const leads = await Lead.find().sort({ createdAt: -1 });
+        const leads = await Lead.find({}).sort({ createdAt: -1 }).lean();
         return res.status(200).json({ success: true, count: leads.length, data: leads });
     } catch (error) {
-        console.error('Fetch leads error:', error);
-        return res.status(500).json({ success: false, message: 'Server error.' });
+        if (!IS_PROD) console.error('[leads] GET error:', error.stack);
+        else console.error('[leads] GET error:', error.message);
+        return res.status(500).json({ success: false, code: 'INTERNAL_ERROR', message: 'Server error.' });
     }
 });
 

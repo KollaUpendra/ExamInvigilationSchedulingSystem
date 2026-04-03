@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
-const { generateSchedule, getSchedules, downloadSchedule } = require('../controllers/scheduleController');
+const { generateSchedule, getSchedules, downloadSchedule, deleteSchedule } = require('../controllers/scheduleController');
 
 // Configure multer for memory storage
 const storage = multer.memoryStorage();
@@ -29,5 +29,11 @@ router.get('/', getSchedules);
  * @desc Download the generated schedule excel file (or input file if ?type=input)
  */
 router.get('/:id/download', downloadSchedule);
+
+/**
+ * @route DELETE /api/schedule/:id
+ * @desc Delete a schedule record from the database
+ */
+router.delete('/:id', deleteSchedule);
 
 module.exports = router;
