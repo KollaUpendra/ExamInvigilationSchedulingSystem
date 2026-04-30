@@ -14,17 +14,20 @@ const IS_PROD = process.env.NODE_ENV === 'production';
  * Key = period number (1-6), Value = [startTime, endTime] in HH:MM.
  * Lunch break is between periods 4 and 5 (12:50–13:40).
  */
+
 const PERIOD_TIMES = {
-    1: ['09:30', '10:20'],
-    2: ['10:20', '11:10'],
-    3: ['11:10', '12:00'],
-    4: ['12:00', '12:50'],
-    5: ['13:40', '14:30'],
-    6: ['14:30', '15:20'],
+    1: ['09:00', '10:00'],
+    2: ['10:00', '11:00'],
+    3: ['11:00', '12:00'],
+    4: ['12:00', '12:40'],
+    5: ['12:40', '13:40'],
+    6: ['13:40', '14:40'],
+    7: ['14:40', '15:40'],
+    8: ['15:40', '16:40'],
 };
 
 /** Maximum invigilation slots a single teacher may take on one calendar day. */
-const MAX_SLOTS_PER_DAY = 2;
+const MAX_SLOTS_PER_DAY = 3;
 
 /** Maximum schedules returned by the history endpoint (prevents huge payloads). */
 const MAX_HISTORY_RECORDS = 50;
@@ -233,25 +236,32 @@ function parseTimetable(buffer) {
 // -----------------------------
 
 /**
- * Returns true if the teacher has NO explicit different-year conflict
- * during the periods that overlap with the exam slot.
+ * Returns true if the teacher has NO blocking timetable conflict during the
+ * periods that overlap with the exam slot, applying **day-level normalization**.
  *
- * Rules:
- *  - null/undefined period entry  → teacher is free (no conflict)
- *  - same-year entry              → teacher is free (their class has this exam)
- *  - different-year entry         → CONFLICT
+ * Rules (evaluated per overlapping period):
+ *  - null/undefined period entry                       → free (no conflict)
+ *  - teacherYear ∈ examYearsForDay[slot.day]           → treat as free
+ *    (that year's classes are suspended for the exam)
+ *  - teacherYear ∉ examYearsForDay[slot.day]           → CONFLICT
  *
- * A teacher with no entry for that day at all is treated as fully free.
+ * A teacher with no timetable entry for that day is treated as fully free.
+ *
+ * @param {string} teacher
+ * @param {object} slot              - exam slot (must have .day, .start, .end)
+ * @param {object} teacherSchedule   - parsed timetable
+ * @param {Map<string,Set<number>>} examYearsForDay - precomputed day → Set<year>
  */
-function hasNoConflict(teacher, slot, teacherSchedule) {
-    const examYear = slot.year;
+function hasNoConflict(teacher, slot, teacherSchedule, examYearsForDay) {
     const periods = getOverlappingPeriods(slot.start, slot.end);
     const daySchedule = (teacherSchedule[teacher] && teacherSchedule[teacher][slot.day]) || {};
+    const freeYears = examYearsForDay.get(slot.day) || new Set();
 
     for (const periodId of periods) {
         const year = daySchedule[periodId];
-        if (year !== null && year !== undefined && year !== examYear) {
-            return false; // explicit different-year → conflict
+        // Null/undefined → free; year has an exam that day → free; otherwise conflict
+        if (year !== null && year !== undefined && !freeYears.has(year)) {
+            return false; // teaching a year with no exam today → conflict
         }
     }
     return true;
@@ -345,7 +355,7 @@ function parseBackendDate(dateStr) {
  * Guaranteed to never crash: if fewer teachers exist than required, returns
  * a partial assignment with understaffed=true and shortage > 0.
  */
-function assignTeachersToSlot(slot, teachers, teacherSchedule, teacherLoad, teacherDailyLoad, teacherLastDate) {
+function assignTeachersToSlot(slot, teachers, teacherSchedule, teacherLoad, teacherDailyLoad, teacherLastDate, examYearsForDay) {
     const required = slot.teachers_required;
     const warnings = [];
 
@@ -359,7 +369,7 @@ function assignTeachersToSlot(slot, teachers, teacherSchedule, teacherLoad, teac
     // ── TIER 1: strict ──────────────────────────────────────────────────────
     const tier1Pool = teachers.filter((t) => {
         const dailyLoad = (teacherDailyLoad[t] && teacherDailyLoad[t][slot.date]) || 0;
-        return hasNoConflict(t, slot, teacherSchedule) && dailyLoad < MAX_SLOTS_PER_DAY;
+        return hasNoConflict(t, slot, teacherSchedule, examYearsForDay) && dailyLoad < MAX_SLOTS_PER_DAY;
     });
 
     const tier1Sorted = sortByScore(tier1Pool);
@@ -371,7 +381,7 @@ function assignTeachersToSlot(slot, teachers, teacherSchedule, teacherLoad, teac
 
     // ── TIER 2: relax daily limit (still conflict-free) ─────────────────────
     const tier2Pool = teachers.filter(
-        (t) => !tier1Assigned.has(t) && hasNoConflict(t, slot, teacherSchedule)
+        (t) => !tier1Assigned.has(t) && hasNoConflict(t, slot, teacherSchedule, examYearsForDay)
     );
 
     const tier2Sorted = sortByScore(tier2Pool);
@@ -387,8 +397,9 @@ function assignTeachersToSlot(slot, teachers, teacherSchedule, teacherLoad, teac
         return { assigned: tier2Combined.slice(0, required), warnings, understaffed: false, shortage: 0 };
     }
 
-    // ── TIER 3: last resort — no explicit different-year conflict ────────────
-    // Includes teachers with null/missing period data (unknown = assumed free).
+    // ── TIER 3: last resort — day-level normalized conflict check ────────────
+    // Applies the same examYearsForDay normalization for consistency.
+    const freeYears = examYearsForDay.get(slot.day) || new Set();
     const tier2Set = new Set(tier2Combined);
     const tier3Pool = teachers.filter((t) => {
         if (tier2Set.has(t)) return false;
@@ -396,8 +407,9 @@ function assignTeachersToSlot(slot, teachers, teacherSchedule, teacherLoad, teac
         const periods = getOverlappingPeriods(slot.start, slot.end);
         for (const periodId of periods) {
             const year = daySchedule[periodId];
-            if (year !== null && year !== undefined && year !== slot.year) {
-                return false; // explicit conflict → exclude
+            // Same day-level rule: only block if year has NO exam today
+            if (year !== null && year !== undefined && !freeYears.has(year)) {
+                return false; // teaching a non-exam year → still a conflict
             }
         }
         return true;
@@ -425,9 +437,10 @@ function assignTeachersToSlot(slot, teachers, teacherSchedule, teacherLoad, teac
 /**
  * Counts teachers who are conflict-free for a slot (ignores daily limits).
  * Used to order slots for scheduling: scarcest slot goes first.
+ * Uses day-level normalization via examYearsForDay.
  */
-function countEligibleTeachers(slot, teachers, teacherSchedule) {
-    return teachers.filter((t) => hasNoConflict(t, slot, teacherSchedule)).length;
+function countEligibleTeachers(slot, teachers, teacherSchedule, examYearsForDay) {
+    return teachers.filter((t) => hasNoConflict(t, slot, teacherSchedule, examYearsForDay)).length;
 }
 
 // -----------------------------
@@ -459,11 +472,24 @@ function generateScheduleList(teacherSchedule, examSlots, duplicateWarnings) {
         teacherLastDate[t] = null;
     }
 
+    // ── Precompute day-level exam years (O(slots)) ────────────────────────────
+    // examYearsForDay: Map<slotDay, Set<year>>
+    // For each calendar day, collect all student years that have an exam.
+    // Any timetable period whose year appears in this set is treated as free
+    // (classes for that year are effectively suspended on exam day).
+    const examYearsForDay = new Map();
+    for (const slot of examSlots) {
+        if (!examYearsForDay.has(slot.day)) {
+            examYearsForDay.set(slot.day, new Set());
+        }
+        examYearsForDay.get(slot.day).add(slot.year);
+    }
+
     // ── Step 1: Scarcity-first ordering ──────────────────────────────────────
     const slotsWithIndex = examSlots.map((slot, idx) => ({
         slot,
         originalIndex: idx,
-        eligibilityCount: countEligibleTeachers(slot, teachers, teacherSchedule),
+        eligibilityCount: countEligibleTeachers(slot, teachers, teacherSchedule, examYearsForDay),
     }));
 
     // Keep a stable sort: tie-break by original index so identical-eligibility
@@ -480,7 +506,7 @@ function generateScheduleList(teacherSchedule, examSlots, duplicateWarnings) {
 
     for (const { slot, originalIndex } of sortedSlots) {
         const result = assignTeachersToSlot(
-            slot, teachers, teacherSchedule, teacherLoad, teacherDailyLoad, teacherLastDate
+            slot, teachers, teacherSchedule, teacherLoad, teacherDailyLoad, teacherLastDate, examYearsForDay
         );
 
         for (const w of result.warnings) warnings.push(w);
