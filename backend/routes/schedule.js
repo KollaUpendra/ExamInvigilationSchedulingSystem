@@ -5,10 +5,32 @@ const { generateSchedule, getSchedules, downloadSchedule, deleteSchedule } = req
 
 // Configure multer for memory storage
 const storage = multer.memoryStorage();
+
+/**
+ * Only accept MIME types that correspond to Excel workbooks.
+ * Browsers may send .xlsx as 'application/octet-stream' so that is also allowed.
+ * The magic-byte check inside the controller is the authoritative second layer.
+ */
+const ALLOWED_MIME_TYPES = new Set([
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // .xlsx
+    'application/vnd.ms-excel',                                            // .xls
+    'application/octet-stream',                                            // generic binary (some browsers)
+]);
+
 const upload = multer({
     storage,
     limits: {
         fileSize: 10 * 1024 * 1024, // 10MB limit
+    },
+    fileFilter: (_req, file, cb) => {
+        if (ALLOWED_MIME_TYPES.has(file.mimetype)) {
+            cb(null, true);
+        } else {
+            const err = new Error('Only .xlsx or .xls Excel files are allowed.');
+            err.code = 'INVALID_FILE_TYPE';
+            err.status = 400;
+            cb(err, false);
+        }
     },
 });
 

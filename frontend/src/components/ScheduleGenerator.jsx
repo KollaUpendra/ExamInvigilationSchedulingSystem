@@ -45,7 +45,10 @@ export default function ScheduleGenerator({ onScheduleGenerated }) {
     const getDayName = (dateStr) => {
         if (!dateStr) return '';
         const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-        return days[new Date(dateStr).getDay()] || '';
+        // Append 'T00:00' (no Z) so the browser parses the date in LOCAL time
+        // instead of UTC. Without this, 'YYYY-MM-DD' is treated as UTC midnight,
+        // which shifts the day backwards by 1 in UTC+ timezones (e.g. IST = UTC+5:30).
+        return days[new Date(dateStr + 'T00:00').getDay()] || '';
     };
 
     /** Converts "YYYY-MM-DD" → "D/M/YY" for the backend. */
@@ -92,6 +95,11 @@ export default function ScheduleGenerator({ onScheduleGenerated }) {
             return;
         }
 
+        if (new Set(validDates).size !== validDates.length) {
+            setMessage('Duplicate dates found. Please ensure all exam dates are unique.');
+            return;
+        }
+
         for (const s of dailySlots) {
             if (!s.slot?.trim() || !s.start || !s.end || !s.year || !s.teachers_required) {
                 setMessage('Please fill in all fields for each daily slot.');
@@ -129,10 +137,19 @@ export default function ScheduleGenerator({ onScheduleGenerated }) {
             formData.append('file', file);
             formData.append('examSlots', JSON.stringify(generatedSlots));
 
-            const response = await fetch(`${API}/api/schedule/generate`, {
-                method: 'POST',
-                body: formData,
-            });
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 30_000);
+
+            let response;
+            try {
+                response = await fetch(`${API}/api/schedule/generate`, {
+                    method: 'POST',
+                    body: formData,
+                    signal: controller.signal,
+                });
+            } finally {
+                clearTimeout(timeoutId);
+            }
 
             clearInterval(progressInterval);
             setProgress(100);
@@ -162,7 +179,10 @@ export default function ScheduleGenerator({ onScheduleGenerated }) {
             clearInterval(progressInterval);
             setProgress(0);
             console.error('Submit error:', error);
-            setMessage(`❌ ${error.message}`);
+            const msg = error.name === 'AbortError'
+                ? 'Request timed out (30 s). Check your connection and try again.'
+                : error.message;
+            setMessage(`❌ ${msg}`);
         } finally {
             // Let the 100% bar linger briefly before hiding
             setTimeout(() => {

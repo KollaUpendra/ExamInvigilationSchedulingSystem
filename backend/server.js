@@ -118,6 +118,15 @@ app.use((err, req, res, _next) => {
         });
     }
 
+    // Multer / fileFilter — wrong MIME type
+    if (err.code === 'INVALID_FILE_TYPE') {
+        return res.status(400).json({
+            success: false,
+            code: 'INVALID_FILE_TYPE',
+            message: err.message || 'Only .xlsx or .xls Excel files are allowed.',
+        });
+    }
+
     // Generic server error — only log full details server-side
     if (!IS_PROD) {
         console.error('[Error]', err.stack || err);

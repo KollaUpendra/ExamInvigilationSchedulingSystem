@@ -11,19 +11,16 @@ const IS_PROD = process.env.NODE_ENV === 'production';
 
 /**
  * Fixed teaching period windows for the institution.
- * Key = period number (1-6), Value = [startTime, endTime] in HH:MM.
- * Lunch break is between periods 4 and 5 (12:50–13:40).
+ * Key = period number (1-8), Value = [startTime, endTime] in HH:MM.
  */
 
 const PERIOD_TIMES = {
-    1: ['09:00', '10:00'],
-    2: ['10:00', '11:00'],
-    3: ['11:00', '12:00'],
-    4: ['12:00', '12:40'],
-    5: ['12:40', '13:40'],
-    6: ['13:40', '14:40'],
-    7: ['14:40', '15:40'],
-    8: ['15:40', '16:40'],
+    1: ['09:30', '10:30'],
+    2: ['10:30', '11:30'],
+    3: ['11:40', '12:40'],
+    4: ['13:40', '14:40'],
+    5: ['14:40', '15:40'],
+    6: ['15:40', '16:40'],
 };
 
 /** Maximum invigilation slots a single teacher may take on one calendar day. */
@@ -112,8 +109,9 @@ function overlap(start1, end1, start2, end2) {
 // -----------------------------
 
 /**
- * Returns the list of teaching period IDs (1-6) that overlap with the
- * given exam time window.  Uses precise minute-level comparison.
+ * Returns the list of teaching period IDs that overlap with the given exam
+ * time window. Period IDs are the keys of PERIOD_TIMES (currently 1–6).
+ * Uses precise minute-level comparison.
  */
 function getOverlappingPeriods(slotStart, slotEnd) {
     const overlapping = [];
@@ -131,12 +129,20 @@ function getOverlappingPeriods(slotStart, slotEnd) {
 
 /**
  * Extracts the student year integer from a spreadsheet cell value.
- * Accepts values like "Year 1", "1", "CSE 2", "  3  " etc.
+ *
+ * Cell format in this institution's timetable:
+ *   "<year> <DEPT> <section> <Subject>-<room>"
+ *   e.g. "4 ECE 3 Signals-7"  →  year = 4
+ *        "3 ECE 2 DBMS-5"     →  year = 3
+ *        "4 CE 1 Signals-4"   →  year = 4
+ *
+ * The FIRST all-digit token is always the year.
+ * Also handles plain values like "2", "Year 2", "  3  ", etc.
  * Returns null for empty / non-numeric cells.
  */
 function extractYear(cell) {
     if (cell === null || cell === undefined || cell === '') return null;
-    const parts = String(cell).split(/\s+/);
+    const parts = String(cell).trim().split(/\s+/);
     for (const part of parts) {
         if (/^\d+$/.test(part)) return parseInt(part, 10);
     }
@@ -160,13 +166,14 @@ function isXlsxBuffer(buffer) {
 
 /**
  * Parses the uploaded timetable workbook.
- * Each sheet = one teacher. Rows = days, columns 1-6 = periods.
+ * Each sheet = one teacher. Rows = days, columns 1‥N = periods (N = PERIOD_TIMES length).
+ * Day keys are normalised to lowercase so lookups are case-insensitive.
  *
  * Duplicate sheet names are MERGED (union of day entries).
  * If both sheets define the same day, the one with more non-null periods wins.
  *
  * Returns:
- *   { teacherSchedule: { teacherName: { dayName: { 1: year|null, ..., 6: year|null } } },
+ *   { teacherSchedule: { teacherName: { dayName: { 1: year|null, …, N: year|null } } },
  *     duplicateWarnings: string[] }
  */
 function parseTimetable(buffer) {
@@ -196,9 +203,12 @@ function parseTimetable(buffer) {
             if (!row || row.length === 0) continue;
             const day = row[0];
             if (day === null || day === undefined || day === '') continue;
-            const dayKey = String(day).trim();
+            const dayKey = String(day).trim().toLowerCase(); // normalise: "Monday" → "monday"
             dayData[dayKey] = {};
-            for (let periodIndex = 1; periodIndex <= 6; periodIndex++) {
+            // Read exactly as many period columns as PERIOD_TIMES defines.
+            // Hard-coding 6 here would silently drop data when periods are added.
+            const numPeriods = Object.keys(PERIOD_TIMES).length;
+            for (let periodIndex = 1; periodIndex <= numPeriods; periodIndex++) {
                 dayData[dayKey][periodIndex] = extractYear(row[periodIndex]);
             }
         }
@@ -236,35 +246,57 @@ function parseTimetable(buffer) {
 // -----------------------------
 
 /**
- * Returns true if the teacher has NO blocking timetable conflict during the
- * periods that overlap with the exam slot, applying **day-level normalization**.
+ * Returns true if the teacher has NO blocking timetable conflict for the
+ * given exam slot.
  *
- * Rules (evaluated per overlapping period):
- *  - null/undefined period entry                       → free (no conflict)
- *  - teacherYear ∈ examYearsForDay[slot.day]           → treat as free
- *    (that year's classes are suspended for the exam)
- *  - teacherYear ∉ examYearsForDay[slot.day]           → CONFLICT
+ * Algorithm (strict two-step order — BOTH steps are mandatory):
  *
- * A teacher with no timetable entry for that day is treated as fully free.
+ *   STEP 1 — Time filter:
+ *     Compute the timetable period IDs that overlap with [slot.start, slot.end].
+ *     Only these periods are inspected — periods outside the exam window are
+ *     completely ignored.
  *
- * @param {string} teacher
- * @param {object} slot              - exam slot (must have .day, .start, .end)
- * @param {object} teacherSchedule   - parsed timetable
+ *   STEP 2 — Day-level year normalization (applied ONLY within those periods):
+ *     For each overlapping period:
+ *       teacherYear = timetable[teacher][day][period]
+ *
+ *       Case A  teacherYear is null/undefined   → free   (teacher has no class)
+ *       Case B  teacherYear ∈ examYearsForDay   → free   (that year's class is
+ *                                                          suspended for the exam)
+ *       Case C  teacherYear ∉ examYearsForDay   → CONFLICT (teacher is occupied
+ *                                                            with a non-exam class)
+ *
+ * Edge case (Case 4 from spec):
+ *   Slot 10–12 (Year 2 exam), teacher: 10–11 → Year 2, 11–12 → Year 1
+ *   Periods 2 (10–11) and 3 (11–12) both overlap.
+ *   Period 2: Year 2 ∈ examYears → free.
+ *   Period 3: Year 1 ∉ examYears → CONFLICT.  Returns false. ✓
+ *
+ * A teacher with no timetable entry for that day at all is fully free.
+ *
+ * @param {string}                  teacher
+ * @param {object}                  slot            - must have .day, .start, .end
+ * @param {object}                  teacherSchedule - parsed timetable
  * @param {Map<string,Set<number>>} examYearsForDay - precomputed day → Set<year>
  */
 function hasNoConflict(teacher, slot, teacherSchedule, examYearsForDay) {
+    // slot.day is pre-normalised to lowercase by the controller; .toLowerCase()
+    // is kept here as a safety net in case hasNoConflict is called elsewhere.
+    const dayKey = (slot.day || '').trim().toLowerCase();
+    // STEP 1: filter to only the periods that overlap this exam's time window
     const periods = getOverlappingPeriods(slot.start, slot.end);
-    const daySchedule = (teacherSchedule[teacher] && teacherSchedule[teacher][slot.day]) || {};
-    const freeYears = examYearsForDay.get(slot.day) || new Set();
+    const daySchedule = (teacherSchedule[teacher] && teacherSchedule[teacher][dayKey]) || {};
+    // STEP 2: day-level normalization applied exclusively within those periods
+    const freeYears = examYearsForDay.get(dayKey) || new Set();
 
     for (const periodId of periods) {
         const year = daySchedule[periodId];
-        // Null/undefined → free; year has an exam that day → free; otherwise conflict
+        // null/undefined → Case A (free); freeYears → Case B (free); else → Case C (conflict)
         if (year !== null && year !== undefined && !freeYears.has(year)) {
-            return false; // teaching a year with no exam today → conflict
+            return false; // Case C: teaching a year with no exam today → conflict
         }
     }
-    return true;
+    return true; // all overlapping periods are free
 }
 
 /**
@@ -273,8 +305,9 @@ function hasNoConflict(teacher, slot, teacherSchedule, examYearsForDay) {
  */
 function teacherTeachesSameYear(teacher, slot, teacherSchedule) {
     const examYear = slot.year;
+    const dayKey = (slot.day || '').trim().toLowerCase();
     const periods = getOverlappingPeriods(slot.start, slot.end);
-    const daySchedule = (teacherSchedule[teacher] && teacherSchedule[teacher][slot.day]) || {};
+    const daySchedule = (teacherSchedule[teacher] && teacherSchedule[teacher][dayKey]) || {};
 
     for (const periodId of periods) {
         if (daySchedule[periodId] === examYear) return true;
@@ -333,7 +366,10 @@ function computeScore(teacher, slot, teacherSchedule, teacherLoad, teacherDailyL
  */
 function parseBackendDate(dateStr) {
     if (!dateStr) return new Date(0);
-    const [d, m, y] = dateStr.split('/');
+    const parts = dateStr.split('/');
+    if (parts.length !== 3) return new Date(0);
+    const [d, m, y] = parts;
+    if (!d || !m || !y) return new Date(0);
     // Assume 2000s for 2-digit year
     return new Date(`20${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`);
 }
@@ -345,9 +381,9 @@ function parseBackendDate(dateStr) {
 /**
  * Assigns teachers to a single exam slot using a 3-tier fallback.
  *
- * Tier 1 (strict):  conflict-free + within daily limit
- * Tier 2 (relaxed): conflict-free + ignore daily limit
- * Tier 3 (last resort): no explicit conflict (null/same-year periods ok)
+ * Tier 1 (strict):  conflict-free (day-level normalized) + within daily limit
+ * Tier 2 (relaxed): conflict-free (day-level normalized) + ignore daily limit
+ * Tier 3 (last resort): same conflict check as Tier 1/2 (no further relaxation)
  *
  * Returns:
  *   { assigned: string[], warnings: string[], understaffed: boolean, shortage: number }
@@ -397,13 +433,16 @@ function assignTeachersToSlot(slot, teachers, teacherSchedule, teacherLoad, teac
         return { assigned: tier2Combined.slice(0, required), warnings, understaffed: false, shortage: 0 };
     }
 
-    // ── TIER 3: last resort — day-level normalized conflict check ────────────
-    // Applies the same examYearsForDay normalization for consistency.
-    const freeYears = examYearsForDay.get(slot.day) || new Set();
+    // ── TIER 3: last resort ──────────────────────────────────────────────────
+    // Identical conflict rule to Tier 1/2 (overlapping periods + day-level
+    // normalization).  Inlined here only to avoid a redundant function call
+    // on the already-excluded tier2Set teachers.
+    const dayKey = (slot.day || '').trim().toLowerCase();
+    const freeYears = examYearsForDay.get(dayKey) || new Set();
     const tier2Set = new Set(tier2Combined);
     const tier3Pool = teachers.filter((t) => {
         if (tier2Set.has(t)) return false;
-        const daySchedule = (teacherSchedule[t] && teacherSchedule[t][slot.day]) || {};
+        const daySchedule = (teacherSchedule[t] && teacherSchedule[t][dayKey]) || {};
         const periods = getOverlappingPeriods(slot.start, slot.end);
         for (const periodId of periods) {
             const year = daySchedule[periodId];
@@ -473,16 +512,17 @@ function generateScheduleList(teacherSchedule, examSlots, duplicateWarnings) {
     }
 
     // ── Precompute day-level exam years (O(slots)) ────────────────────────────
-    // examYearsForDay: Map<slotDay, Set<year>>
-    // For each calendar day, collect all student years that have an exam.
-    // Any timetable period whose year appears in this set is treated as free
-    // (classes for that year are effectively suspended on exam day).
+    // Map<dayKey(lowercase), Set<year>>.
+    // Any timetable period whose year is in this set is treated as free
+    // (that year's classes are suspended for the exam).
+    // slot.day is already normalised to lowercase by the controller above.
     const examYearsForDay = new Map();
     for (const slot of examSlots) {
-        if (!examYearsForDay.has(slot.day)) {
-            examYearsForDay.set(slot.day, new Set());
+        const dayKey = (slot.day || '').trim().toLowerCase();
+        if (!examYearsForDay.has(dayKey)) {
+            examYearsForDay.set(dayKey, new Set());
         }
-        examYearsForDay.get(slot.day).add(slot.year);
+        examYearsForDay.get(dayKey).add(slot.year);
     }
 
     // ── Step 1: Scarcity-first ordering ──────────────────────────────────────
@@ -721,6 +761,9 @@ exports.generateSchedule = async (req, res) => {
         for (const slot of examSlots) {
             slot.year = Number(slot.year);
             slot.teachers_required = Number(slot.teachers_required);
+            // Normalise slot.day here so every downstream consumer
+            // (examYearsForDay, hasNoConflict, Tier 3) all see the same key.
+            if (typeof slot.day === 'string') slot.day = slot.day.trim().toLowerCase();
 
             if (!slot.date || !slot.day || !slot.slot || !slot.start || !slot.end) {
                 return res.status(400).json({

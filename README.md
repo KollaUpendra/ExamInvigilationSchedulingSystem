@@ -126,6 +126,24 @@ Set `NODE_ENV=production` and `FRONTEND_URL` to your Vercel deployment URL.
 
 ---
 
+## Timetable Excel Format
+
+To generate a schedule, the institution must upload a `.xlsx` file containing the teacher timetables. The file must adhere to the following structure:
+
+- **Sheets**: Each sheet in the workbook represents one teacher. The name of the sheet should be the teacher's name.
+- **Rows (Days)**: The first column (Column A) should contain the day of the week (e.g., "Monday", "Tuesday").
+- **Columns (Periods)**: The subsequent columns represent the teaching periods (1 through 8).
+- **Cell Values**: The value in a period cell should indicate the class the teacher is assigned to. Crucially, the **first numeric token** in the cell is extracted as the **student year** (e.g., "4 ECE 3", "Year 2", or just "1"). If a teacher is free, the cell should be empty.
+
+Example of a teacher's sheet:
+
+| Day | 1 (09:00) | 2 (10:00) | 3 (11:00) | 4 (12:00) | 5 (12:40) | 6 (13:40) | 7 (14:40) | 8 (15:40) |
+|---|---|---|---|---|---|---|---|---|
+| Monday | 2 CSE A | 2 CSE A | | 1 IT | | 3 ECE | | |
+| Tuesday | | 1 IT | 1 IT | | 4 MECH | | | 2 EEE |
+
+---
+
 ## API Reference
 
 All endpoints return `Content-Type: application/json`.  

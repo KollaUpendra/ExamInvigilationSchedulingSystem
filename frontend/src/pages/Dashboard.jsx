@@ -27,12 +27,22 @@ export default function Dashboard() {
     const fetchSchedules = useCallback(async () => {
         setFetchError('');
         try {
-            const res = await fetch(`${API}/api/schedule`);
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 10_000);
+            let res;
+            try {
+                res = await fetch(`${API}/api/schedule`, { signal: controller.signal });
+            } finally {
+                clearTimeout(timeoutId);
+            }
             if (!res.ok) throw new Error(`Server returned ${res.status}`);
             const data = await res.json();
             if (data.success) setSchedules(data.schedules || []);
         } catch (err) {
-            setFetchError('Could not load schedule history. Is the server running?');
+            const msg = err.name === 'AbortError'
+                ? 'Request timed out. Is the server running?'
+                : 'Could not load schedule history. Is the server running?';
+            setFetchError(msg);
             console.error('fetchSchedules:', err);
         } finally {
             setStatsLoading(false);
@@ -458,7 +468,7 @@ function Badge({ icon, label }) {
 function QuickActionsPanel() {
     const shortcuts = [
         { icon: '📋', title: 'Export All History', desc: 'Download a combined report of all past schedules.' },
-        { icon: '⚙️', title: 'Configure Periods', desc: 'Customise the 6 teaching period time windows.' },
+        { icon: '⚙️', title: 'Configure Periods', desc: 'Customise the teaching period time windows.' },
         { icon: '📨', title: 'Email Roster', desc: 'Send the invigilation roster directly to teachers.' },
     ];
 
